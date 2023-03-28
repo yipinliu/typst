@@ -1,6 +1,6 @@
 use once_cell::sync::Lazy;
 use syntect::highlighting as synt;
-use typst::syntax::{self, LinkedNode};
+use typst::syntax::{self, LinkedNode, SyntaxKind};
 
 use super::{
     FontFamily, FontList, Hyphenate, LinebreakElem, SmartQuoteElem, TextElem, TextSize,
@@ -101,6 +101,21 @@ pub struct RawElem {
     /// ```
     /// ````
     pub lang: Option<EcoString>,
+
+    /// Whether to show the line number of the raw text.
+    /// 
+    /// ````example
+    /// #set raw(
+    ///     lineno: true
+    /// )
+    /// ```rs
+    /// fn main() {
+    ///     println!("Hello, world!");
+    /// }
+    /// ```
+    /// ````
+    #[default(false)]
+    pub lineno: bool,
 }
 
 impl RawElem {
@@ -130,12 +145,15 @@ impl Show for RawElem {
     fn show(&self, _: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
         let text = self.text();
         let lang = self.lang(styles).as_ref().map(|s| s.to_lowercase());
+        let lineno = self.lineno(styles);
         let foreground = THEME
             .settings
             .foreground
             .map(to_typst)
             .map_or(Color::BLACK, Color::from)
             .into();
+        let line_count = text.matches('\n').count();
+        let width = num_width(line_count);
 
         let mut realized = if matches!(lang.as_deref(), Some("typ" | "typst" | "typc")) {
             let root = match lang.as_deref() {
@@ -145,12 +163,35 @@ impl Show for RawElem {
 
             let mut seq = vec![];
             let highlighter = synt::Highlighter::new(&THEME);
+            if lineno {
+                seq.push(TextElem::packed(format!("{:>width$}| ", 0, width=width)));
+            }
+            let mut line_num = 1;
             highlight_themed(
                 &LinkedNode::new(&root),
                 vec![],
                 &highlighter,
                 &mut |node, style| {
-                    seq.push(styled(&text[node.range()], foreground, style));
+                    if lineno && matches!(node.kind(), SyntaxKind::Space) {
+                        let mut s = text[node.range()].split('\n');
+                        let first = match s.next() {
+                            Some(v) => v,
+                            None => return,
+                        };
+                        if !first.is_empty() {
+                            seq.push(styled(first, foreground, style));
+                        }
+                        while let Some(v) = s.next() {
+                            seq.push(LinebreakElem::new().pack());
+                            seq.push(TextElem::packed(format!("{:>width$}| ", line_num, width=width)));
+                            line_num += 1;
+                            if !v.is_empty() {
+                                seq.push(styled(v, foreground, style));
+                            }
+                        }
+                    } else {
+                        seq.push(styled(&text[node.range()], foreground, style));
+                    }
                 },
             );
 
@@ -163,6 +204,9 @@ impl Show for RawElem {
             for (i, line) in text.lines().enumerate() {
                 if i != 0 {
                     seq.push(LinebreakElem::new().pack());
+                }
+                if lineno {
+                    seq.push(TextElem::packed(format!("{:>width$}| ", i, width = width)));
                 }
 
                 for (style, piece) in
@@ -253,6 +297,15 @@ fn to_typst(synt::Color { r, g, b, a }: synt::Color) -> RgbaColor {
 
 fn to_syn(RgbaColor { r, g, b, a }: RgbaColor) -> synt::Color {
     synt::Color { r, g, b, a }
+}
+
+fn num_width(mut num: usize) -> usize {
+    let mut width = 0;
+    while num != 0 {
+        width += 1;
+        num /= 10;
+    }
+    width
 }
 
 /// The syntect syntax definitions.
